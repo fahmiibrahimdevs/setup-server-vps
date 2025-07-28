@@ -3,7 +3,7 @@
 # ==============================
 # VPS Setup Script - Ubuntu 24.04
 # Author: Midragon Dev (Refactored)
-# Date: 2025-07-01
+# Date: 2025-07-27
 # ==============================
 
 set -e
@@ -55,10 +55,12 @@ fi
 log_step "5/13" "Configuring UFW firewall"
 apt install -y ufw
 ufw allow OpenSSH
-ufw allow 'Nginx Full' || true
+ufw allow 'Nginx Full'
 ufw allow 1883
-ufw allow 8080 # phpmyadmin
+ufw allow 8080
 ufw allow 9001
+ufw allow 8883
+ufw allow 9443
 ufw --force enable
 
 ### 6. Install PHP 8.1–8.4
@@ -84,7 +86,6 @@ if [ ! -f /usr/local/bin/composer ]; then
   curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
 fi
 
-# Tambahkan alias hanya jika belum ada
 ZSHRC="$HOME/.zshrc"
 if ! grep -q "composer81" "$ZSHRC"; then
   cat <<'EOL' >> "$ZSHRC"
@@ -96,52 +97,74 @@ alias composer83='php8.3 /usr/local/bin/composer'
 alias composer84='php8.4 /usr/local/bin/composer'
 EOL
   echo "✅ Composer aliases added to ~/.zshrc"
-  echo "ℹ️  Please run 'source ~/.zshrc' inside Zsh shell to use the aliases."
 else
   echo "✅ Composer aliases already exist in ~/.zshrc"
 fi
 
-### 8. Install Mosquitto MQTT
-#log_step "8/13" "Installing Mosquitto MQTT"
-#if ! is_installed mosquitto; then
-#  apt install -y mosquitto mosquitto-clients
-#fi
+### 8. Install Mosquitto MQTT (with TLS, WebSocket, Auth)
+log_step "8/13" "Installing Mosquitto MQTT with TLS, WebSocket, and Auth"
 
-# Set permission & prepare
-#mkdir -p /var/log/mosquitto /run/mosquitto
-#chown -R mosquitto:mosquitto /var/log/mosquitto /run/mosquitto
-#chmod -R 740 /var/log/mosquitto /run/mosquitto
+CERT_DIR="/etc/mosquitto/certs"
+PASSWD_FILE="/etc/mosquitto/passwd"
+ACL_FILE="/etc/mosquitto/acl"
+MQTT_USER="nexaryn"
+MQTT_PASS="31750321"
+MQTT_TOPIC="#"
+DOMAIN="localhost"
+CONF_FILE="/etc/mosquitto/conf.d/auth.conf"
 
-#if [ ! -f /etc/mosquitto/passwd ]; then
-#  mosquitto_passwd -b -c /etc/mosquitto/passwd nexaryn 31750321
-#  chown mosquitto:mosquitto /etc/mosquitto/passwd
-#  chmod 640 /etc/mosquitto/passwd
-#fi
+add-apt-repository -y ppa:mosquitto-dev/mosquitto-ppa
+apt update
+apt install -y mosquitto mosquitto-clients
 
-# Konfigurasi mosquitto.conf (overwrite dengan aman)
-#CONF_FILE="/etc/mosquitto/mosquitto.conf"
-#p "$CONF_FILE" "${CONF_FILE}.bak.$(date +%s)" || true
-#cat <<EOF > "$CONF_FILE"
-#id_file /run/mosquitto/mosquitto.pid
-#user mosquitto
+mkdir -p "$CERT_DIR"
+openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+  -keyout "$CERT_DIR/server.key" \
+  -out "$CERT_DIR/server.crt" \
+  -subj "/CN=$DOMAIN"
+cp "$CERT_DIR/server.crt" "$CERT_DIR/ca.crt"
 
-#persistence true
-#persistence_location /var/lib/mosquitto/
+mosquitto_passwd -b -c "$PASSWD_FILE" "$MQTT_USER" "$MQTT_PASS"
+echo "user $MQTT_USER" > "$ACL_FILE"
+echo "topic readwrite $MQTT_TOPIC" >> "$ACL_FILE"
 
-#log_dest file /var/log/mosquitto/mosquitto.log
+cat <<EOF > "$CONF_FILE"
+# MQTT tanpa TLS
+listener 1883
+protocol mqtt
 
-#allow_anonymous false
-#password_file /etc/mosquitto/passwd
+# WebSocket tanpa TLS
+listener 9001
+protocol websockets
 
-#listener 1883
-#protocol mqtt
+# MQTT dengan TLS
+listener 8883
+protocol mqtt
+cafile $CERT_DIR/ca.crt
+certfile $CERT_DIR/server.crt
+keyfile $CERT_DIR/server.key
 
-#listener 9001
-#protocol websockets
-#EOF
+# WebSocket dengan TLS
+listener 9443
+protocol websockets
+cafile $CERT_DIR/ca.crt
+certfile $CERT_DIR/server.crt
+keyfile $CERT_DIR/server.key
 
-#systemctl enable mosquitto
-#systemctl restart mosquitto
+# Auth
+allow_anonymous false
+password_file $PASSWD_FILE
+acl_file $ACL_FILE
+EOF
+
+chown -R mosquitto: /etc/mosquitto
+chmod 640 $CERT_DIR/*.crt
+chmod 600 $CERT_DIR/*.key
+chmod 600 "$PASSWD_FILE"
+chmod 600 "$ACL_FILE"
+
+systemctl enable mosquitto
+systemctl restart mosquitto
 
 ### 9. Install MariaDB
 log_step "9/13" "Installing MariaDB"
@@ -171,7 +194,6 @@ else
   echo "✅ phpMyAdmin already installed."
 fi
 
-# Konfigurasi phpMyAdmin di NGINX (tanpa domain, untuk akses via IP)
 cat <<EOF > /etc/nginx/sites-available/phpmyadmin.conf
 server {
     listen 8080;
@@ -203,7 +225,6 @@ server {
 }
 EOF
 
-# Enable konfigurasi dan reload nginx
 ln -sf /etc/nginx/sites-available/phpmyadmin.conf /etc/nginx/sites-enabled/phpmyadmin.conf
 nginx -t && systemctl reload nginx
 
