@@ -59,7 +59,11 @@ log_step "5/13" "Configuring UFW firewall"
 apt install -y ufw
 ufw allow OpenSSH
 ufw allow 'Nginx Full'
-ufw allow 1883 8080 9001 8883 9443
+ufw allow 1883
+ufw allow 8080
+ufw allow 9001
+ufw allow 8883
+ufw allow 9443
 ufw --force enable
 
 ### 6. Install PHP 8.1–8.4
